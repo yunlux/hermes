@@ -104,6 +104,10 @@ def claude_code_only_env(tmp_path, monkeypatch):
     # Patch Path.home() so the adapter finds the file
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
+    # Keep this upstream fixture focused on credential discovery, independent of pricing.
+    monkeypatch.setattr("hermes_cli.free_model_filter.free_model_ids",
+                        lambda provider, fallback=(), **kw: list(fallback))
+
     for var in [
         "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
         "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",

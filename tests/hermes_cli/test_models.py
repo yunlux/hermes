@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 from hermes_cli.nous_account import NousPortalAccountInfo
 from hermes_cli.models import (
-    OPENROUTER_MODELS, fetch_openrouter_models, detect_provider_for_model,
+    OPENROUTER_MODELS, _unfiltered_fetch_openrouter_models as fetch_openrouter_models, detect_provider_for_model,
     partition_nous_models_by_tier,
     check_nous_free_tier, union_with_portal_free_recommendations,
     union_with_portal_paid_recommendations,
@@ -17,6 +17,16 @@ from hermes_cli.models import (
 import hermes_cli.models as _models_mod
 from hermes_cli import models_local
 from hermes_cli import models_validate
+
+
+@pytest.fixture(autouse=True)
+def _test_upstream_catalog_layer(monkeypatch):
+    # These are the upstream transport/cache tests, not workstation menu-policy tests.
+    # The public free/subscription overlay is exercised by test_subscription_menu_filter.
+    import hermes_cli.models as mod
+    monkeypatch.setattr(mod, "fetch_openrouter_models", mod._unfiltered_fetch_openrouter_models)
+    monkeypatch.setattr(mod, "provider_model_ids", mod._unfiltered_provider_model_ids)
+    monkeypatch.setattr(mod, "cached_provider_model_ids", mod._unfiltered_cached_provider_model_ids)
 
 
 class TestFetchOpenRouterModels:

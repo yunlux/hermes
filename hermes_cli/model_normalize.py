@@ -208,7 +208,7 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
     provider = _normalize_provider_alias(target_provider)
 
     if provider in _AGGREGATOR_PROVIDERS:
-        return _prepend_vendor(name)
+        return _prepend_vendor(_strip_matching_provider_prefix(name, provider))
 
     # OpenCode Zen / Go are flat-namespace resellers: /v1/models returns bare IDs and inference 401s
     # vendor-prefixed names, so strip ANY leading ``vendor/`` (commonly copied from aggregator slugs).

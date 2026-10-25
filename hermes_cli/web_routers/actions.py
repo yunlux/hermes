@@ -292,7 +292,7 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
 
     Returns install_method ('apt'|'git'|'docker'|'nix'|'nixos'|'unknown'),
     current_version, behind (commits behind, 0 = up to date, -1 = unknown count,
-    null = check could not run), update_available, can_apply (git only — the
+    null = check could not run), update_available, can_apply (eligible git installs — the
     dashboard button can apply in place), update_command, message (guidance for
     non-applyable methods) and, for git installs that are behind, commits
     [{sha, summary, author, at}] (additive; existing consumers ignore it).
@@ -322,6 +322,14 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
         "update_available": False, "can_apply": install_method == "git",
         "update_command": recommended_update_command_for_method(install_method), "message": None,
     }
+    # A writable Git checkout may still be owned by a package or an image.
+    # Use the same marker-first admission decision as the update action.
+    from hermes_cli.update_contract import evaluate_update_admission
+
+    refusal = evaluate_update_admission(_server_path("PROJECT_ROOT"))
+    if refusal is not None and refusal.code in {"package-managed", "image-marker", "image-marker-invalid"}:
+        payload.update(can_apply=False, update_command=refusal.update_command, message=refusal.message)
+        return payload
     non_applyable = _NON_APPLYABLE_MESSAGES.get(install_method)
     if non_applyable is not None:
         payload["message"] = non_applyable()

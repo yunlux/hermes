@@ -1164,13 +1164,15 @@ class TestGetTextAuxiliaryClient:
         assert model is None
 
     def test_custom_endpoint_uses_codex_wrapper_when_runtime_requests_responses_api(self):
+        # Exercise the explicit endpoint builder, not automatic paid discovery.
+        from agent.auxiliary_client import _try_custom_endpoint
         with patch("agent.auxiliary_client._resolve_custom_runtime",
                    return_value=("https://api.openai.com/v1", "sk-test", "codex_responses")), \
              patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
              patch("agent.auxiliary_client._resolve_nous_runtime_api", return_value=None), \
              patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.3-codex"), \
              patch("agent.auxiliary_client.OpenAI") as mock_openai:
-            client, model = get_text_auxiliary_client()
+            client, model = _try_custom_endpoint()
 
         from agent.auxiliary_client import CodexAuxiliaryClient
         assert isinstance(client, CodexAuxiliaryClient)
@@ -1474,6 +1476,7 @@ class TestRefreshNousRecommendedModel:
 
 
     def test_falls_back_to_default_when_portal_unavailable(self, monkeypatch):
+        monkeypatch.setattr("hermes_cli.free_model_filter.free_model_ids", lambda *a, **kw: [_NOUS_MODEL])
         def _boom(**kw):
             raise RuntimeError("portal down")
         monkeypatch.setattr(
@@ -1539,7 +1542,8 @@ class TestTryPaymentFallback:
         """Discovery only walks with no selected main provider (``auto``); a selected provider that
         fails never hops to another logged-in account (test_auxiliary_auto_never_guesses_provider)."""
         mock_client = MagicMock()
-        with patch("agent.auxiliary_client._try_openrouter", return_value=(None, None)), \
+        with patch("hermes_cli.free_model_filter.free_model_ids", return_value=["nous-model"]), \
+             patch("agent.auxiliary_client._try_openrouter", return_value=(None, None)), \
              patch("agent.auxiliary_client._try_nous", return_value=(mock_client, "nous-model")), \
              patch("agent.auxiliary_client._read_main_provider", return_value="auto"):
             client, model, label = _try_payment_fallback("openrouter", task="compression")
@@ -4437,7 +4441,8 @@ class TestAuxUnhealthyCache:
         # Mark BOTH the failed provider (openrouter) and a sibling (custom)
         # unhealthy. The chain should still find nous.
         _mark_provider_unhealthy("local/custom")
-        with patch("agent.auxiliary_client._read_main_provider", return_value="auto"), \
+        with patch("hermes_cli.free_model_filter.free_model_ids", return_value=["n-model"]), \
+             patch("agent.auxiliary_client._read_main_provider", return_value="auto"), \
              patch("agent.auxiliary_client._try_openrouter") as or_try, \
              patch("agent.auxiliary_client._try_nous", return_value=(nous_client, "n-model")), \
              patch("agent.auxiliary_client._try_custom_endpoint") as custom_try, \

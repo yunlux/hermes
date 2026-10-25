@@ -167,6 +167,8 @@ def build_models_payload(
 
     drop_unofferable_model_ids(rows)
 
+    from hermes_cli.free_model_filter import filter_provider_rows
+    rows = filter_provider_rows(rows)
     return {"providers": rows, "model": ctx.current_model, "provider": ctx.current_provider}
 
 

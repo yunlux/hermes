@@ -2655,6 +2655,9 @@ def run_job(
         )
         logger.info("Job '%s' completed successfully", job_name)
         _audit.write(dict(result, response_silent=_is_cron_silence_response(final_response or "")), None)
+        if not result.get("failed") and result.get("completed", True):
+            from cron.token_savings_prechecks import commit_success
+            commit_success(_get_hermes_home(), job)
         return True, output, final_response, None
 
     except Exception as e:

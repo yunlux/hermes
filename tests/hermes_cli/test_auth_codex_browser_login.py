@@ -19,6 +19,15 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _builtin_codex_auth_only(monkeypatch):
+    # This module exercises built-in browser/device auth, not a plugin override.
+    # Plugin-discovery tests may previously mirror built-in profiles globally.
+    from hermes_cli import auth_plugin_providers
+    monkeypatch.setattr(auth_plugin_providers, "PLUGIN_MIRRORED_PROVIDERS",
+                        auth_plugin_providers.PLUGIN_MIRRORED_PROVIDERS - {"openai-codex"})
+
+
 def _jwt(email: str) -> str:
     b64 = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
     return f"{b64(b'{}')}.{b64(json.dumps({'email': email}).encode())}.sig"
@@ -125,7 +134,7 @@ def test_default_is_device_code_and_busy_callback_port_falls_back(tmp_path, monk
 
     def _device():
         device_logins.append(1)
-        return {"tokens": {"access_token": _jwt("device@example.com"), "refresh_token": "rt-dev"},
+        return {"tokens": {"access_token": _jwt("device@example.com"), "refresh_token": f"rt-dev-{len(device_logins)}"},
                 "base_url": "https://chatgpt.com/backend-api/codex", "last_refresh": "2026-01-01T00:00:00Z"}
     monkeypatch.setattr("hermes_cli.auth._codex_device_code_login", _device)
     bind_attempts = []

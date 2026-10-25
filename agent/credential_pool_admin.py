@@ -120,7 +120,18 @@ class CredentialPoolAdminMixin:
         from hermes_cli.auth_oauth_grants import SINGLE_USE_REFRESH_POOL_PROVIDERS
 
         with self._lock:
+            if any(existing.id == entry.id for existing in self._entries):
+                raise ValueError("Credential id already exists; reload before adding")
+            if (getattr(self, "_auth_store_path", None) is not None
+                    and (getattr(self, "_borrowed_root_ids", None)
+                         or (not _profile_owns_pool_provider(self.provider)
+                             and _borrowed_single_use_pool_root() == self._auth_store_path))):
+                from agent.credential_pool_codex_authority import claim_profile_entry
+                return claim_profile_entry(self, entry)
             entry = replace(entry, priority=_next_priority(self._entries))
+            before_entries = list(self._entries)
+            before_current = self._current_id
+            before_rows = dict(getattr(self, "_auth_store_rows", {}))
             self._entries.append(entry)
             borrowed_ids = self._borrowed_root_ids
             # Decided now, not from load_pool()'s snapshot: a profile with no
@@ -128,7 +139,8 @@ class CredentialPoolAdminMixin:
             # ``_persist`` would send the new row to the update-only root merge,
             # which drops it (#103694).
             profile_borrows = (
-                self.provider in SINGLE_USE_REFRESH_POOL_PROVIDERS
+                getattr(self, "_auth_store_path", None) is None
+                and self.provider in SINGLE_USE_REFRESH_POOL_PROVIDERS
                 and not _profile_owns_pool_provider(self.provider)
                 and _borrowed_single_use_pool_root() is not None
             )
@@ -149,6 +161,20 @@ class CredentialPoolAdminMixin:
                 )
                 self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
                 self._borrowed_root_ids = set()
+                # This pool now owns a profile-local grant instead of borrowing
+                # root rows. Subsequent refreshes must follow that ownership.
+                if getattr(self, "_auth_store_path", None) is not None:
+                    import hermes_cli.auth as auth
+                    self._auth_store_path = auth._auth_file_path().resolve()
+                    self._auth_store_rows = {entry.id: entry.to_dict()}
+            elif getattr(self, "_auth_store_path", None) is not None:
+                try:
+                    self._persist(added_ids=[entry.id])
+                except Exception:
+                    self._entries = before_entries
+                    self._current_id = before_current
+                    self._auth_store_rows = before_rows
+                    raise
             else:
                 self._persist()
             # Callers print "Added" on return; a row the store did not keep

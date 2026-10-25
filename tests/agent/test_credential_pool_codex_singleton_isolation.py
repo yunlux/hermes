@@ -84,9 +84,8 @@ def test_independent_manual_account_refreshes_with_its_own_pair(home, monkeypatc
     assert on_disk["providers"]["openai-codex"]["tokens"] == {"access_token": a_at, "refresh_token": "rt-A"}
 
 
-def test_same_account_alias_adopts_only_a_newer_singleton(home, monkeypatch):
-    """A legacy alias (same principal) must follow a singleton that was re-authed AFTER it, but must
-    not fall back onto a singleton older than its own rotation — that replays a consumed token."""
+def test_same_account_rows_never_adopt_a_distinct_singleton(home, monkeypatch):
+    """Same principal and a newer timestamp do not prove the same OAuth login chain."""
     now = time.time()
     alias_at = _jwt("acct-A", "user-A", now + 8 * 3600)
     stale_singleton_at = _jwt("acct-A", "user-A", now + 3600)
@@ -98,9 +97,12 @@ def test_same_account_alias_adopts_only_a_newer_singleton(home, monkeypatch):
     synced = pool._sync_entry_from_auth_store(alias)
     assert (synced.access_token, synced.refresh_token) == (alias_at, "rt-alias")
 
-    # The user re-authenticates the singleton (newer stamp, same principal): the alias follows.
+    # A new singleton login is a separate row; the original row keeps its exact grant.
     fresh_at = _jwt("acct-A", "user-A", now + 9 * 3600)
     _write_store(home, {"access_token": fresh_at, "refresh_token": "rt-fresh"}, _iso(now + 5),
                  {"access_token": alias_at, "refresh_token": "rt-alias", "last_refresh": _iso(now - 60)})
-    synced = load_pool("openai-codex")._sync_entry_from_auth_store(alias)
-    assert (synced.access_token, synced.refresh_token) == (fresh_at, "rt-fresh")
+    reloaded = load_pool("openai-codex")
+    synced = reloaded._sync_entry_from_auth_store(alias)
+    assert (synced.access_token, synced.refresh_token) == (alias_at, "rt-alias")
+    assert any((row.access_token, row.refresh_token) == (fresh_at, "rt-fresh")
+               and row.id != alias.id for row in reloaded.entries())

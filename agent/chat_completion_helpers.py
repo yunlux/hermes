@@ -765,6 +765,9 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     so callers can register it with their abort/close machinery; bedrock / MoA
     manage their own clients. Interrupt/abort/close semantics stay in callers.
     """
+    from agent.usage_ledger import recorded_call, observe_request
+    if agent.provider != "moa" and agent.api_mode not in {"chat_completions", "codex_responses"}:
+        observe_request(agent.client, api_kwargs, agent=agent, api_mode=agent.api_mode)
     if agent.api_mode == "codex_responses":
         return agent._run_codex_stream(api_kwargs, client=make_client("codex_stream_request"),
             on_first_delta=getattr(agent, "_codex_on_first_delta", None))
@@ -790,7 +793,8 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     # request transform. No-op unless this really is the OpenAI SDK, so the
     # MoA facade above and the suite's stand-in clients are unaffected.
     api_kwargs = bypass_chat_sdk_request_transform(api_kwargs, request_client)
-    return _chat_completion_capturing_headers(agent, request_client, api_kwargs)
+    return recorded_call(request_client, api_kwargs, lambda request: _chat_completion_capturing_headers(agent, request_client, request),
+                        agent=agent, api_mode=agent.api_mode)
 
 
 
@@ -2055,6 +2059,9 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
+    from providers import get_provider_profile
+    if getattr(get_provider_profile(getattr(agent, "provider", "")), "disable_runtime_fallback", False):
+        return False
     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
     if switch_deferred_by_reset(agent, reason, reset_at):
         return False
@@ -2568,6 +2575,8 @@ class _BedrockStream:
         return _on
 
     def _open_stream(self, next_api_kwargs: dict[str, Any]):
+        from agent.usage_ledger import observe_request
+        observe_request(self.agent.client, next_api_kwargs, agent=self.agent, api_mode="bedrock_converse")
         return _bedrock_converse_call(dict(next_api_kwargs), stream=True, on_stream_denied=self._fall_back_to_converse)
 
     def _fall_back_to_converse(self, client, final_kwargs: dict, exc: Exception):
@@ -2953,7 +2962,9 @@ class _StreamingCall(StreamingWaitMonitor):
         # #93650: as above — the streaming path carries the same bulk
         # messages/tools payload and pays the same client-side walk.
         stream_kwargs = bypass_chat_sdk_request_transform(stream_kwargs, request_client)
-        return request_client.chat.completions.create(**stream_kwargs)
+        from agent.usage_ledger import recorded_call
+        return recorded_call(request_client, stream_kwargs, lambda request: request_client.chat.completions.create(**request),
+                            agent=self.agent, api_mode=self.agent.api_mode)
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
         response = self._attempt_stream_response = getattr(raw_stream, "response", None)
@@ -3400,6 +3411,8 @@ class _StreamingCall(StreamingWaitMonitor):
         def _open_anthropic_stream(next_api_kwargs: dict[str, Any]):
             final_kwargs = dict(next_api_kwargs)
             sanitize_anthropic_kwargs(final_kwargs, log_prefix=getattr(self.agent, "log_prefix", ""))
+            from agent.usage_ledger import observe_request
+            observe_request(request_client, final_kwargs, agent=self.agent, api_mode="anthropic_messages")
             manager = request_client.messages.stream(**final_kwargs)
             _stream_context["manager"] = manager
             return normalize_stream_usage(manager.__enter__())

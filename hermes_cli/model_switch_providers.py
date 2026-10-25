@@ -328,6 +328,10 @@ def _raw_pool_usable(hermes_id: str, *, for_picker: bool = False) -> bool:
 
 def _pool_usable(slug: str, *, for_picker: bool = False) -> bool:
     try:
+        from providers import get_provider_profile
+        status_hook = getattr(get_provider_profile(slug), "account_auth_status", None)
+        if callable(status_hook):
+            return bool(status_hook().get("logged_in"))
         return _credential_pool_is_usable(slug, for_picker=for_picker)
     except Exception as exc:
         logger.debug("Credential pool check failed for %s: %s", slug, exc)
@@ -415,6 +419,9 @@ def _live_or_curated_ids(slug: str, curated: dict, *fallback_keys: str, merge_mo
     model_ids = cached_provider_model_ids(slug, non_blocking=non_blocking)
     if not model_ids:
         model_ids = _first_curated(curated, fallback_keys or (slug,))
+        if not model_ids:
+            from providers import get_provider_profile
+            model_ids = list(getattr(get_provider_profile(slug), "fallback_models", ()) or ())
         if merge_models_dev and slug in _MODELS_DEV_PREFERRED:
             model_ids = _merge_with_models_dev(slug, model_ids)
     return without_generation_models(model_ids)
@@ -1347,6 +1354,8 @@ def _finalize_picker_rows(results: list, user_providers, current_model: str) -> 
             break
 
     # Current provider first, then by model count descending
+    from hermes_cli.free_model_filter import filter_provider_rows
+    results = filter_provider_rows(results)
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
     return results
 
@@ -1409,7 +1418,8 @@ def list_picker_providers(
 
     drop_unofferable_model_ids(filtered)
     _attach_window_model_notes(filtered)
-    return filtered
+    from hermes_cli.free_model_filter import filter_provider_rows
+    return filter_provider_rows(filtered)
 
 
 def _attach_window_model_notes(providers: list[dict]) -> None:

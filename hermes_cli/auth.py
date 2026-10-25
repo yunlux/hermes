@@ -2185,6 +2185,10 @@ def get_auth_status(provider_id: Optional[str] = None) -> dict[str, Any]:
     if status_fn_name:
         return globals()[status_fn_name]()
     pconfig = _registry_lookup(target)
+    from providers import get_provider_profile
+    status_hook = getattr(get_provider_profile(target), "account_auth_status", None)
+    if callable(status_hook):
+        return status_hook()
     if pconfig and pconfig.auth_type in _STATUS_BY_AUTH_TYPE:
         return globals()[_STATUS_BY_AUTH_TYPE[pconfig.auth_type]](target)
     return {"logged_in": False}

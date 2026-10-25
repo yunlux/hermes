@@ -23,6 +23,16 @@ import pytest
 from tests.waiting import wait_until
 
 
+@pytest.fixture(autouse=True)
+def _test_upstream_catalog_layer(monkeypatch):
+    # These are the upstream transport/cache tests, not workstation menu-policy tests.
+    # The public free/subscription overlay is exercised by test_subscription_menu_filter.
+    import hermes_cli.models as mod
+    monkeypatch.setattr(mod, "fetch_openrouter_models", mod._unfiltered_fetch_openrouter_models)
+    monkeypatch.setattr(mod, "provider_model_ids", mod._unfiltered_provider_model_ids)
+    monkeypatch.setattr(mod, "cached_provider_model_ids", mod._unfiltered_cached_provider_model_ids)
+
+
 class TestCachedFetchApiModels:
     def _entry(self, models, age_seconds, fp="fp"):
         return {"fp": fp, "at": time.time() - age_seconds, "models": list(models)}

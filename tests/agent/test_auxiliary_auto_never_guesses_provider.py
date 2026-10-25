@@ -54,6 +54,8 @@ def test_quarantined_fallback_hands_over_to_the_next_configured_entry():
 
 
 def test_no_selected_main_provider_still_discovers(nous_is_the_only_working_provider):
-    with patch.object(aux, "_read_main_provider", return_value="auto"):
+    # Discovery is permitted only for an eligible zero-priced catalog fixture.
+    with patch("hermes_cli.free_model_filter.free_model_ids", return_value=["nous-model"]), \
+         patch.object(aux, "_read_main_provider", return_value="auto"):
         client, model, label = aux._resolve_auto_route(main_runtime={"provider": "auto"}, task="compression")
     assert client is not None and (model, label) == ("nous-model", "nous")

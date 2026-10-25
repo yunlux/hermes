@@ -3,7 +3,7 @@
 Text auto chain: main provider+model → OpenRouter → Nous Portal → custom endpoint →
 native Anthropic → direct API-key providers → None. Vision auto chain: main
 provider (if a supported vision backend) → OpenRouter → Nous → Anthropic → custom.
-``auxiliary.free_only`` restricts the OpenRouter lane to ``:free`` SKUs. Codex OAuth is
+Automatic provider discovery uses the public zero-price catalog. Explicit routes remain usable. Codex OAuth is
 in neither chain (undocumented, shifting allow-list): main provider or explicit
 ``auxiliary.<task>.provider`` only. HTTP 402 in call_llm() falls through the chain.
 """
@@ -119,7 +119,7 @@ def aux_probe_mode():
         _aux_probe_state.active = prev
 
 
-from agent.credential_pool import load_pool
+from agent.credential_pool import STATUS_DEAD, load_pool
 from agent.custom_entry_pool import entry_scoped_pool, pool_for_aux_provider
 from agent.message_metadata import data_use_requirement
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
@@ -844,12 +844,10 @@ def _task_prefers_fast_model(task: Optional[str]) -> bool:
         _get_auxiliary_task_config(task).get("prefer_fast_model"), default=False)
 
 
-# Dedicated vision models for direct providers whose main chat model differs. zai: glm-5.3-flash
-# is the only image-capable GLM id served on every Z.AI surface (pay-as-you-go and Coding Plan,
-# global and CN); the former glm-5v-turbo pin 404s / 1211 "Unknown Model" on the coding endpoints
-# (#111429). ZaiProfile has no default_vision_model(), so dropping the pin would route vision to
-# the user's text-only chat model and skip Z.AI entirely.
-_PROVIDER_VISION_MODELS: dict[str, str] = {"xiaomi": "mimo-v2.5", "zai": "glm-5.3-flash"}
+# Dedicated vision models for direct providers whose main chat model differs.
+# Empty: vision tasks now follow the main agent's provider/model (resolved at runtime via
+# _resolve_provider_vision_default → provider_vision_default or main_model).
+_PROVIDER_VISION_MODELS: dict[str, str] = {"xiaomi": "mimo-v2.5", "zai": "glm-5.3-flash"}  # vision follows main agent's provider/model; no hardcoded pins
 
 
 def _resolve_provider_vision_default(provider: str) -> Optional[str]:
@@ -958,9 +956,8 @@ def _nous_extra_body() -> dict:
 # Set at resolve time — True if the auxiliary client points to Nous Portal
 auxiliary_is_nous: bool = False
 
-# _OPENROUTER_MODEL MUST stay a :free SKU (matching the free_only warning): this lane engages
-# silently, and a paid default meant spend the user never opted into. User-configured values
-# are honored untouched (_warn_paid_lane_once fires).
+# Automatic auxiliary discovery is filtered by the public catalog below. Explicitly configured
+# routes remain available, with optional user request rules applied at the request boundary.
 _OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 _NOUS_MODEL = "google/gemini-3.6-flash"
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
@@ -2180,6 +2177,15 @@ def _resolve_api_key_provider() -> tuple[Optional[OpenAI], Optional[str]]:
         model = _get_aux_model_for_provider(provider_id) or None
         if model is None:
             continue  # skip provider if we don't know a valid aux model
+        # Automatic discovery offers public zero-price routes; explicitly pinned routes stay usable.
+        from hermes_cli.free_model_filter import free_model_ids, read_snapshot
+        candidates = free_model_ids(provider_id, [model], base_url=pconfig.inference_base_url)
+        if not candidates:
+            candidates = free_model_ids(provider_id, read_snapshot().get("providers", {}).get(provider_id, []),
+                                        base_url=pconfig.inference_base_url, require_tools=True)
+        if not candidates:
+            continue
+        model = candidates[0]
         pool_present, entry = _select_pool_entry(provider_id)
         if pool_present:
             api_key = _pool_runtime_api_key(entry)
@@ -2276,18 +2282,6 @@ def _is_free_model(model: Optional[str]) -> bool:
     return normalized.endswith(":free") or normalized.startswith("stealth/")
 
 
-def _aux_openrouter_settings() -> tuple[bool, str]:
-    """Read (free_only, openrouter_model) from config; (False, _OPENROUTER_MODEL) on failure."""
-    try:
-        from hermes_cli.config import cfg_get, load_config_readonly
-        cfg = load_config_readonly()
-        free_only = bool(cfg_get(cfg, "auxiliary", "free_only", default=False))
-        val = cfg_get(cfg, "auxiliary", "openrouter_model")
-        model = val.strip() if isinstance(val, str) and val.strip() else _OPENROUTER_MODEL
-        return free_only, model
-    except Exception:
-        return False, _OPENROUTER_MODEL
-
 
 def _warn_paid_lane_once(model: str) -> None:
     """Log a WARNING the first time a non-free OpenRouter model is engaged."""
@@ -2299,6 +2293,20 @@ def _warn_paid_lane_once(model: str) -> None:
         "a :free SKU and may incur real spend. Set auxiliary.free_only: true to restrict auxiliary "
         "fallbacks to free models, or auxiliary.openrouter_model to a :free model.", model,
     )
+
+
+
+def _aux_openrouter_settings() -> tuple[bool, str]:
+    """Read (free_only, openrouter_model) from config; (False, _OPENROUTER_MODEL) on failure."""
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+        cfg = load_config_readonly()
+        free_only = bool(cfg_get(cfg, "auxiliary", "free_only", default=False))
+        val = cfg_get(cfg, "auxiliary", "openrouter_model")
+        model = val.strip() if isinstance(val, str) and val.strip() else _OPENROUTER_MODEL
+        return free_only, model
+    except Exception:
+        return False, _OPENROUTER_MODEL
 
 
 def _try_openrouter(explicit_api_key: Optional[str | Callable[[], str]] = None, model: str | None = None,
@@ -2416,7 +2424,7 @@ def _try_nous(vision: bool = False) -> tuple[Optional[OpenAI], Optional[str]]:
     if not _aux_probe_active():
         try:
             from hermes_cli.models import get_nous_recommended_aux_model
-            recommended = get_nous_recommended_aux_model(vision=vision)
+            recommended = get_nous_recommended_aux_model(vision=vision, free_tier=True)
             if recommended:
                 model = recommended
                 logger.debug("Auxiliary/%s: using Portal-recommended model %s", lane, model)
@@ -2440,12 +2448,13 @@ def _refresh_nous_recommended_model(*, vision: bool, stale_model: Optional[str])
     fresh: Optional[str] = None
     try:
         from hermes_cli.models import get_nous_recommended_aux_model
-        fresh = get_nous_recommended_aux_model(vision=vision, force_refresh=True)
+        fresh = get_nous_recommended_aux_model(vision=vision, free_tier=True, force_refresh=True)
     except Exception as exc:
         logger.debug("Nous recommended-model refresh failed (%s); using default %s", exc, _NOUS_MODEL)
-    if fresh and fresh.strip().lower() != stale:
+    from hermes_cli.free_model_filter import free_model_ids
+    if fresh and fresh.strip().lower() != stale and free_model_ids("nous", [fresh]):
         return fresh
-    return _NOUS_MODEL if _NOUS_MODEL.strip().lower() != stale else None
+    return _NOUS_MODEL if _NOUS_MODEL.strip().lower() != stale and free_model_ids("nous", [_NOUS_MODEL]) else None
 
 
 def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
@@ -2642,6 +2651,11 @@ def _relay_sync_completion(
     task = relay_context.get("task")
     relay_context["stream_provider"] = provider or relay_context.get("provider")
     callback = create or (lambda request: _create_with_progress(client, request, task))
+    raw_callback = callback
+    from agent.usage_ledger import recorded_call
+    callback = lambda request: recorded_call(client, request, raw_callback, provider=provider or "",
+        api_mode=api_mode or "chat_completions", task=str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "auxiliary"),
+        runtime=_normalize_main_runtime(None))
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
     # Isolate only the provider callback so the owning thread can unwind its lease/DB
     # transaction on hard cancel without touching the shared client.
@@ -2675,6 +2689,11 @@ async def _relay_async_completion(
     kwargs = prepare_chat_messages(client, kwargs)
     # Async twin of the seam default above (#98466).
     callback = create or (lambda request: _acreate_with_progress(client, request))
+    raw_callback = callback
+    from agent.usage_ledger import recorded_async_call
+    callback = lambda request: recorded_async_call(client, request, raw_callback, provider=provider or "",
+        api_mode=api_mode or "chat_completions", task=str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "auxiliary"),
+        runtime=_normalize_main_runtime(None))
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
     if route is None:
         return await callback(kwargs)
@@ -2704,7 +2723,11 @@ def _relay_sync_stream(
     kwargs = prepare_chat_messages(client, kwargs)
     # The bypass runs inside the provider callback, AFTER Relay has seen (and possibly
     # rewritten) the real conversation; applying it to `kwargs` would hand Relay an empty one.
-    create = lambda request: client.chat.completions.create(**bypass_chat_sdk_request_transform(request, client))
+    from agent.usage_ledger import recorded_call
+    create = lambda request: recorded_call(client, request,
+        lambda final: client.chat.completions.create(**bypass_chat_sdk_request_transform(final, client)),
+        provider=provider or "", api_mode=api_mode or "chat_completions",
+        task=str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "auxiliary"), runtime=_normalize_main_runtime(None))
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
     if route is None:
         return create(kwargs)
@@ -2762,7 +2785,7 @@ def _runtime_main_value(field: str) -> Any:
 def set_runtime_main(
     provider: str, model: str, *, requested_provider: str = "", base_url: str = "",
     api_key: Any = "", api_mode: str = "", auth_mode: str = "", session_id: str = "",
-    cache_scope: str = "",
+    cache_scope: str = "", billing_source: str = "", billing_home: str = "",
 ) -> contextvars.Token:
     """Record the current context's live main runtime for auxiliary routing.
 
@@ -2784,6 +2807,7 @@ def set_runtime_main(
         "auth_mode": (auth_mode or "").strip().lower(),
         "session_id": (session_id or "").strip(),
         "cache_scope": (cache_scope or "").strip(),
+        "billing_source": billing_source, "billing_home": billing_home,
     }
     # Publish authoritative context before updating the locked mirrors.
     token = _RUNTIME_MAIN_CONTEXT.set(runtime)
@@ -3104,7 +3128,7 @@ def _try_anthropic(explicit_api_key: Optional[str | Callable[[], str]] = None,
 
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
 _MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + (
-    "requested_provider", "session_id", "cache_scope",
+    "requested_provider", "session_id", "cache_scope", "billing_source", "billing_home", "parent_session_id",
 )
 
 
@@ -3140,10 +3164,22 @@ def _get_provider_chain() -> list[tuple]:
 
     ``openai-codex`` is deliberately absent (shifting allow-list breaks guessed-model fallback).
     """
-    return [
+    candidates = [
         ("openrouter", _try_openrouter), ("nous", _try_nous),
         ("local/custom", _try_custom_endpoint), ("api-key", _resolve_api_key_provider),
     ]
+    def free_candidate(label, resolve):
+        def filtered():
+            client, model = resolve()
+            if client is None:
+                return None, None
+            from hermes_cli.free_model_filter import free_model_ids
+            base_url = str(getattr(client, "base_url", "") or "")
+            if not free_model_ids(label, [model], base_url=base_url):
+                return None, None
+            return client, model
+        return filtered
+    return [(label, free_candidate(label, resolve)) for label, resolve in candidates]
 
 
 # "Recently 402'd" unhealthy-provider cache: a depleted provider stays so for hours, so hiding it
@@ -3716,8 +3752,21 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
     another process already rotated (current() would be None).
     """
     normalized = _normalize_aux_provider(provider)
+    runtime_api_key = ""
     try:
-        pool = pool_for_aux_provider(provider, normalized, load_pool)
+        from providers import get_provider_profile
+        profile = get_provider_profile(normalized)
+        resolver = getattr(profile, "resolve_runtime", None)
+        if callable(resolver):
+            # Account-pinned plugins may expose a facade over another provider's native pool.
+            # Their resolver owns the credential boundary; an absent pool must not fall through
+            # to a same-named/ambient store that the plugin never authorized.
+            runtime = resolver(target_model=None, explicit_api_key=None, explicit_base_url=None)
+            pool = runtime.get("credential_pool")
+            key = runtime.get("api_key")
+            runtime_api_key = key.strip() if isinstance(key, str) else ""
+        else:
+            pool = pool_for_aux_provider(provider, normalized, load_pool)
     except Exception as load_exc:
         logger.debug("Auxiliary client: could not load pool for %s recovery: %s", normalized, load_exc)
         return False
@@ -3739,7 +3788,25 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
         return True
 
     if _is_auth_error(exc):
+        if failed_api_key and runtime_api_key and runtime_api_key != failed_api_key:
+            # Runtime resolution already adopted a peer's rotation (or refreshed proactively).
+            # Rebuild the stale client without consuming the new single-use refresh token.
+            _evict_cached_clients(normalized)
+            return True
         if pool.try_refresh_current() is not None:
+            _evict_cached_clients(normalized)
+            return True
+        # A failed refresh may already have made the grant terminal. Re-marking that row with
+        # the original access-token error would downgrade DEAD to a temporary cooldown.
+        entries_fn = getattr(pool, "entries", None)
+        current_fn = getattr(pool, "current", None)
+        failed_entry = current_fn() if callable(current_fn) else None
+        if failed_api_key and callable(entries_fn):
+            failed_entry = next((entry for entry in entries_fn()
+                                 if _pool_runtime_api_key(entry) == failed_api_key), failed_entry)
+        if getattr(failed_entry, "last_status", None) == STATUS_DEAD:
+            if pool.select() is None:
+                return False
             _evict_cached_clients(normalized)
             return True
         return _rotate(401)
@@ -7979,6 +8046,9 @@ def _drive_ladder(ladder, perform: Callable[[_LadderStep], Any]) -> Any:
             try:
                 result = perform(step)
             except Exception as exc:
+                from hermes_cli.request_guard import RequestBlocked
+                if isinstance(exc, RequestBlocked):
+                    raise
                 step = ladder.throw(exc)
             else:
                 step = ladder.send(result)
@@ -7994,6 +8064,9 @@ async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> 
             try:
                 result = await perform(step)
             except Exception as exc:
+                from hermes_cli.request_guard import RequestBlocked
+                if isinstance(exc, RequestBlocked):
+                    raise
                 step = ladder.throw(exc)
             else:
                 step = ladder.send(result)
@@ -8178,7 +8251,9 @@ def _call_llm_impl(
         if task == "moa_aggregator" and isinstance(client, CodexAuxiliaryClient):
             # Responses-shim clients consume the stream internally and return a completed
             # object Relay's managed stream would iterate; the MoA facade wraps it as one chunk.
-            return client.chat.completions.create(**kwargs)
+            from agent.usage_ledger import recorded_call
+            return recorded_call(client, kwargs, lambda request: client.chat.completions.create(**request),
+                                provider=request_provider, api_mode="codex_responses", task=task, runtime=main_runtime)
         return _relay_sync_stream(client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode)
 
     def _primary(**validate_kw: Any) -> Any:
@@ -8229,6 +8304,9 @@ def _call_llm_impl(
                     _last_transient = retry_transient
             raise _last_transient
     except Exception as first_err:
+        from hermes_cli.request_guard import RequestBlocked
+        if isinstance(first_err, RequestBlocked):
+            raise
         def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
@@ -8377,6 +8455,9 @@ async def _async_call_llm_impl(
                         "once on the same provider before fallback: %s", task or "call", transient_err)
             return await _primary()
     except Exception as first_err:
+        from hermes_cli.request_guard import RequestBlocked
+        if isinstance(first_err, RequestBlocked):
+            raise
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":

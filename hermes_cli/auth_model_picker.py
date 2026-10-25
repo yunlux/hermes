@@ -270,7 +270,9 @@ def _prompt_model_selection(
     gateway's per-model usage word on a usage-window plan.
     """
     from hermes_cli.cli_output import line_input
-    _unavailable = unavailable_models or []
+    from hermes_cli.free_model_filter import free_model_ids
+    model_ids = free_model_ids(confirm_provider, model_ids, base_url=confirm_base_url, require_tools=True)
+    _unavailable = []
     # Sale chrome is Nous Portal-only, even if pricing.original is present for another provider.
     sale_chrome = (confirm_provider or "").strip().lower() == "nous"
 
@@ -280,7 +282,7 @@ def _prompt_model_selection(
         # Cost guard needs a known provider; id-keyed guards (data policy) always run.
         ok = _confirm_selection_guards(
             mid, provider=confirm_provider, base_url=confirm_base_url, api_key=confirm_api_key,
-            include_kinds=None if confirm_provider else ["data_policy"],
+            include_kinds=["data_policy"],
         )
         return mid if ok else None
 

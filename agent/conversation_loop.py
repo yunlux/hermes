@@ -1822,7 +1822,8 @@ def run_conversation(
     agent._turn_user_intervened = False
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
-    with native_turn_images(user_message):
+    from agent.usage_ledger import execution_scope
+    with execution_scope(agent), native_turn_images(user_message):
         try:
             result = _run_conversation_turn(
                 agent,

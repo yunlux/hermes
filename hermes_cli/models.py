@@ -654,7 +654,7 @@ def _fetch_live_catalog_index(url: str, timeout: float, opener) -> Optional[tupl
     return live_items, live_by_id
 
 
-def fetch_openrouter_models(
+def _unfiltered_fetch_openrouter_models(
     timeout: float = 8.0, *, force_refresh: bool = False, cache_only: bool = False) -> list[tuple[str, str]]:
     """Return the curated OpenRouter picker list, refreshed from the live catalog when possible.
 
@@ -1670,7 +1670,7 @@ def _profile_live_catalog(normalized: str) -> Optional[list[str]]:
     # profile's fetch_models drives its own subprocess (kwargs are ignored per the base contract).
     # Every non-api-key profile falls back to its own fallback_models (OAuth plugins have no
     # static _PROVIDER_MODELS row), exactly as api_key plugins do below.
-    if profile.auth_type == "external_process":
+    if profile.auth_type == "external_process" or callable(getattr(profile, "account_auth_status", None)):
         try:
             live = profile.fetch_models()
         except Exception as exc:  # a failed subprocess launch degrades to the curated list, like api_key below
@@ -1823,7 +1823,7 @@ def _static_catalog(normalized: str, fetcher: Any) -> list[str]:
     return _chat_catalog_rows(_xai_finalize_catalog(merged) if normalized in {"xai", "xai-oauth"} else merged)
 
 
-def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
+def _unfiltered_provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Best known model catalog for a provider: per-provider live fetchers, then the generic profile
     fetch, then the static list (merged with models.dev for ``_MODELS_DEV_PREFERRED`` providers)."""
     requested = str(provider or "").strip().lower()
@@ -2089,7 +2089,7 @@ def _model_requires_account_discovery(provider: Optional[str], model: str) -> bo
     return _normalized_cache_slug(provider) in {"openai", "openai-api", "openai-codex"} and is_astra_model(model)
 
 
-def cached_provider_model_ids(
+def _unfiltered_cached_provider_model_ids(
     provider: Optional[str], *, force_refresh: bool = False,
     ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL, non_blocking: bool = False) -> list[str]:
     """Disk-cached :func:`provider_model_ids`: fresh cache hit, else live fetch persisting a non-empty
@@ -3000,3 +3000,37 @@ def cached_fetch_api_models(
     if _cache_entry_valid(entry, fp):
         return _catalog(entry)
     return _chat_catalog_rows(live)
+
+
+# Public free menus use the shared catalog; ChatGPT and Go retain native catalogs.
+# Neither list overlay restricts explicit model requests.
+def fetch_openrouter_models(timeout=8.0, *, force_refresh=False, cache_only=False):
+    from hermes_cli.free_model_filter import free_model_ids, read_snapshot
+    data = read_snapshot()
+    ids = data.get("providers", {}).get("openrouter", [])
+    return [(mid, "free") for mid in free_model_ids("openrouter", ids, snapshot=data)]
+
+
+def provider_model_ids(provider, *, force_refresh=False):
+    from hermes_cli.free_model_filter import (
+        _provider_key, _is_local, free_model_ids, read_snapshot, is_unfiltered_menu_route,
+    )
+    if is_unfiltered_menu_route(provider):
+        return _unfiltered_provider_model_ids(provider, force_refresh=force_refresh)
+    if _is_local(provider, ""):
+        return free_model_ids(provider, _unfiltered_provider_model_ids(provider, force_refresh=force_refresh))
+    data = read_snapshot()
+    key = _provider_key(provider)
+    return free_model_ids(provider, data.get("providers", {}).get(key, []), snapshot=data)
+
+
+def cached_provider_model_ids(provider, *, force_refresh=False,
+                              ttl_seconds=_PROVIDER_MODELS_CACHE_TTL, non_blocking=False):
+    from hermes_cli.free_model_filter import _is_local, free_model_ids, is_unfiltered_menu_route
+    if is_unfiltered_menu_route(provider):
+        return _unfiltered_cached_provider_model_ids(provider, force_refresh=force_refresh,
+            ttl_seconds=ttl_seconds, non_blocking=non_blocking)
+    if _is_local(provider, ""):
+        return free_model_ids(provider, _unfiltered_cached_provider_model_ids(provider,
+            force_refresh=force_refresh, ttl_seconds=ttl_seconds, non_blocking=non_blocking))
+    return provider_model_ids(provider, force_refresh=force_refresh)

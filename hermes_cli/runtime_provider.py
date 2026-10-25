@@ -1058,6 +1058,13 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
+    # Non-API-key profile plugins may own account-pinned runtime resolution.
+    from providers import get_provider_profile
+    profile = get_provider_profile(requested_provider)
+    resolver = getattr(profile, "resolve_runtime", None)
+    if callable(resolver):
+        return resolver(target_model=target_model, explicit_api_key=explicit_api_key,
+                        explicit_base_url=explicit_base_url)
     # Same alias expansion the auxiliary client applies, so ``provider: openai`` means one thing on
     # every path (background review, curator, MoA slots, delegation) instead of "Unknown provider".
     # The pre-expansion name is what the codex_app_server overlay judges: ``openai`` is eligible,
@@ -1168,6 +1175,9 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
         return resolve_runtime_provider(requested=requested, target_model=target_model,
                                         explicit_base_url=explicit_base_url, explicit_api_key=explicit_api_key), None
     except AuthError as primary_exc:
+        from providers import get_provider_profile
+        if getattr(get_provider_profile(resolve_requested_provider(requested)), "disable_runtime_fallback", False):
+            raise
         from hermes_cli.fallback_config import effective_runtime_provider, get_fallback_chain, resolve_entry_api_key
         for entry in get_fallback_chain(config):
             provider = (entry.get("provider") or "").strip().lower()

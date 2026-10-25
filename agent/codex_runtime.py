@@ -1263,7 +1263,10 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             )
         stream_kwargs = _sanitize_consumer_codex_request(agent, next_api_kwargs)
         stream_kwargs["stream"] = True
-        return active_client.responses.create(**bypass_sdk_request_transform(stream_kwargs))
+        from agent.usage_ledger import recorded_call
+        return recorded_call(active_client, stream_kwargs,
+                            lambda request: active_client.responses.create(**bypass_sdk_request_transform(request)),
+                            agent=agent, api_mode="codex_responses")
 
     def _log_failure(exc: BaseException) -> None:
         request_body_bytes, exception_chain = _codex_request_failure_details(exc)

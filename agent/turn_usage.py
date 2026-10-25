@@ -77,6 +77,8 @@ def record_response_usage(
     """Fold ``response.usage`` into compressor, anchors, session counters, state.db
     and the API-call log line (see module docstring). No-usage responses only
     consume a pending compaction verdict. Returns the loop-visible outcome."""
+    from agent.usage_ledger import record_response
+    record_response(getattr(agent, "_usage_request", None), response, api_mode=agent.api_mode)
     rearmed = False
     compressor = agent.context_compressor
     # Count every completed provider attempt, including providers that omit usage.
